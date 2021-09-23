@@ -1,8 +1,13 @@
 #include "common.h"
 
 int
-main()
+main(int argc, char **argv)
 {
-	TBD();
+	int wc=1;
+	while(argc>1){
+		printf("%s\n",argv[wc]);
+		++wc;
+		--argc;
+	}
 	return 0;
 }
