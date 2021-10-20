@@ -130,6 +130,7 @@ thread_id()
 void
 thread_stub(void (*thread_main)(void *), void *arg)
 {
+    interrupts_on();
     thread_main(arg);
     thread_exit();
 }
@@ -137,6 +138,7 @@ thread_stub(void (*thread_main)(void *), void *arg)
 Tid
 thread_create(void (*fn) (void *), void *parg)
 {
+    int last_state = interrupts_off();
     Tid thread_id;
     for (thread_id = 0; thread_id < THREAD_MAX_THREADS; ++thread_id){
         if(tid_list[thread_id] == EXITED) {
@@ -148,12 +150,14 @@ thread_create(void (*fn) (void *), void *parg)
             // found empty slot
             struct thread *new_thread = (struct thread *)malloc(sizeof(struct thread));
             if(new_thread == NULL) {
+                interrupts_set(last_state);
                 return THREAD_NOMEMORY;
             }
             new_thread->tid = thread_id;
             void *stack_pointer = malloc(THREAD_MIN_STACK);
             if(stack_pointer == NULL) {
                 free(new_thread);
+                interrupts_set(last_state);
                 return THREAD_NOMEMORY;
             }
             int err = getcontext(&(new_thread->context));
@@ -168,15 +172,18 @@ thread_create(void (*fn) (void *), void *parg)
             new_thread->context.uc_mcontext.gregs[REG_RSI] = (long long int)parg;
 
             push_to_end(ready_queue, new_thread);
+            interrupts_set(last_state);
             return thread_id;
         }
     }
+    interrupts_set(last_state);
     return THREAD_NOMORE;
 }
 
 Tid
 thread_yield(Tid want_tid)
 {
+    int last_state = interrupts_off();
     int current_tid = thread_id();
     struct thread_node *tmp;
     for(tmp = exit_queue->head; tmp != NULL && tmp->next != NULL; tmp = tmp->next) {
@@ -185,19 +192,23 @@ thread_yield(Tid want_tid)
         }
     }
     if(want_tid < THREAD_SELF || want_tid > THREAD_MAX_THREADS) {
+        interrupts_set(last_state);
         return THREAD_INVALID;
     }
     if(want_tid == THREAD_SELF || want_tid == current_tid) {
+        interrupts_set(last_state);
         return current_tid;
     }
     if(want_tid == THREAD_ANY) {
         if(ready_queue->head == NULL) {
             // ready queue empty
+            interrupts_set(last_state);
             return THREAD_NONE;
         }
         want_tid = ready_queue->head->node->tid;
     }
     if(tid_list[want_tid] == EMPTY) {
+        interrupts_set(last_state);
         return THREAD_INVALID;
     }
     volatile bool context_is_called = false;
@@ -208,6 +219,7 @@ thread_yield(Tid want_tid)
         context_is_called = true;
         struct thread *new_thread = delete_node(ready_queue, want_tid);
         if(new_thread == NULL) {
+            interrupts_set(last_state);
             return THREAD_INVALID;
         }
         if(tid_list[current_tid] == RUNNING) {
@@ -219,13 +231,16 @@ thread_yield(Tid want_tid)
         err = setcontext(&(current_thread->context));
         assert(!err);
     }
+    interrupts_set(last_state);
     return want_tid;
 }
 
 void
 thread_exit()
 {
+    int last_state = interrupts_off();
     if(active_thread_count == 1) {
+        interrupts_set(last_state);
         exit(0);
     }
     Tid tid = thread_id();
@@ -234,13 +249,16 @@ thread_exit()
     push_to_end(exit_queue, current_thread);
 
     thread_yield(THREAD_ANY);
+    interrupts_set(last_state);
     return;
 }
 
 Tid
 thread_kill(Tid tid)
 {
+    int last_state = interrupts_off();
     if(tid <= THREAD_ANY || tid >= THREAD_MAX_THREADS) {
+        interrupts_set(last_state);
         return THREAD_INVALID;
     }
 
@@ -248,6 +266,7 @@ thread_kill(Tid tid)
     switch(thread_state) {
         case RUNNING:
         case EMPTY: {
+            interrupts_set(last_state);
             return THREAD_INVALID;
         }
         case BLOCKED:
@@ -260,11 +279,13 @@ thread_kill(Tid tid)
             tid_list[tid] = EMPTY;
             free(thread_to_kill->stack_ptr);
             free(thread_to_kill);
+            interrupts_set(last_state);
             return tid;
         }
         default:
             break;
     }
+    interrupts_set(last_state);
     return THREAD_FAILED;
 }
 
