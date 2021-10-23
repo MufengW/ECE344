@@ -169,7 +169,7 @@ thread_create(void (*fn) (void *), void *parg)
             int err = getcontext(&(new_thread->context));
             assert(!err);
             state_list[thread_id] = READY;
-            wait_list[thread_id] = (struct wait_queue *)malloc(sizeof(struct wait_queue));
+            wait_list[thread_id] = wait_queue_create();
             ++active_thread_count;
             new_thread->stack_ptr = stack_pointer;
             new_thread->context.uc_stack.ss_sp = stack_pointer;
@@ -255,7 +255,7 @@ thread_exit()
     state_list[tid] = EXITED;
     push_to_end(exit_queue, current_thread);
 
-    if(wait_list[tid]->head->node != NULL) {
+    if(wait_list[tid] != NULL) {
         thread_wakeup(wait_list[tid], 1);
     }
     thread_yield(THREAD_ANY);
@@ -332,6 +332,12 @@ wait_queue_destroy(struct wait_queue *wq)
 Tid
 thread_sleep(struct wait_queue *queue)
 {
+    if(queue == NULL) {
+        return THREAD_INVALID;
+    }
+    if(active_thread_count == 1) {
+        return THREAD_NONE;
+    }
     Tid current_tid = thread_id();
     state_list[current_tid] = BLOCKED;
     push_to_end(queue, current_thread);
@@ -344,8 +350,10 @@ thread_sleep(struct wait_queue *queue)
 int
 thread_wakeup(struct wait_queue *queue, int all)
 {
+    if(queue == NULL) {
+        return 0;
+    }
     if(queue->head == NULL) {
-        free(queue);
         return 0;
     }
     Tid head_tid = queue->head->node->tid;
