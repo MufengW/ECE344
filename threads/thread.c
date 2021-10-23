@@ -15,13 +15,8 @@ enum state {
     EXITED
 };
 
-enum state tid_list[THREAD_MAX_THREADS] = {EMPTY};
+enum state state_list[THREAD_MAX_THREADS] = {EMPTY};
 int active_thread_count = 0;
-
-/* This is the wait queue structure */
-struct wait_queue {
-    /* ... Fill this in Lab 3 ... */
-};
 
 /* This is the thread control block */
 struct thread {
@@ -30,7 +25,6 @@ struct thread {
     //State state;
     void* stack_ptr;
     ucontext_t context;
-
 };
 
 struct thread_node {
@@ -38,14 +32,19 @@ struct thread_node {
     struct thread_node *next;
 };
 
-// for ready Q and exit Q
-struct thread_queue {
-    struct thread_node* head;
-};
+/* This is the wait queue structure */
+struct wait_queue {
+    /* ... Fill this in Lab 3 ... */
+    struct thread_node *head;
+} wait_queue;
+
+typedef struct wait_queue thread_queue;
+
+struct wait_queue *wait_list[THREAD_MAX_THREADS] = {NULL};
 
 struct thread *current_thread;
-struct thread_queue *ready_queue;
-struct thread_queue *exit_queue;
+thread_queue *ready_queue;
+thread_queue *exit_queue;
 
 
 void set_current_thread(struct thread *t)
@@ -53,7 +52,7 @@ void set_current_thread(struct thread *t)
     current_thread = t;
 }
 
-void push_to_end(struct thread_queue *queue, struct thread *t)
+void push_to_end(thread_queue *queue, struct thread *t)
 {
     struct thread_node *tmp_thread_node = (struct thread_node *)malloc(sizeof(struct thread_node));
     tmp_thread_node->node = t;
@@ -72,7 +71,7 @@ void push_to_end(struct thread_queue *queue, struct thread *t)
     tmp->next = tmp_thread_node;
 }
 
-struct thread *delete_node(struct thread_queue *queue, Tid tid_to_delete)
+struct thread *delete_node(thread_queue *queue, Tid tid_to_delete)
 {
     if(queue->head == NULL) {
         return NULL;
@@ -106,17 +105,24 @@ struct thread *delete_node(struct thread_queue *queue, Tid tid_to_delete)
 
 }
 
+void thread_destroy(struct thread *t) {
+    Tid tid = t->tid;
+    assert(t != NULL);
+    state_list[tid] = EMPTY;
+    free(t->stack_ptr);
+    free(t);
+}
 
 void
 thread_init(void)
 {
     /* your optional code here */
-    ready_queue = (struct thread_queue *)malloc(sizeof(struct thread_queue));
-    exit_queue = (struct thread_queue *)malloc(sizeof(struct thread_queue));
+    ready_queue = (thread_queue *)malloc(sizeof(thread_queue));
+    exit_queue = (thread_queue *)malloc(sizeof(thread_queue));
     struct thread *thread0 = (struct thread*)malloc(sizeof(struct thread));    // kernel thread
     thread0->tid = 0;
     thread0->stack_ptr = malloc(THREAD_MIN_STACK);
-    tid_list[0] = RUNNING;
+    state_list[0] = RUNNING;
     ++active_thread_count;
     set_current_thread(thread0);
 }
@@ -141,12 +147,12 @@ thread_create(void (*fn) (void *), void *parg)
     int last_state = interrupts_off();
     Tid thread_id;
     for (thread_id = 0; thread_id < THREAD_MAX_THREADS; ++thread_id){
-        if(tid_list[thread_id] == EXITED) {
+        if(state_list[thread_id] == EXITED) {
             thread_kill(thread_id);
-                 }
+        }
     }
     for (thread_id = 0; thread_id < THREAD_MAX_THREADS; ++thread_id){
-        if(tid_list[thread_id] == EMPTY) {
+        if(state_list[thread_id] == EMPTY) {
             // found empty slot
             struct thread *new_thread = (struct thread *)malloc(sizeof(struct thread));
             if(new_thread == NULL) {
@@ -162,7 +168,8 @@ thread_create(void (*fn) (void *), void *parg)
             }
             int err = getcontext(&(new_thread->context));
             assert(!err);
-            tid_list[thread_id] = READY;
+            state_list[thread_id] = READY;
+            wait_list[thread_id] = (struct wait_queue *)malloc(sizeof(struct wait_queue));
             ++active_thread_count;
             new_thread->stack_ptr = stack_pointer;
             new_thread->context.uc_stack.ss_sp = stack_pointer;
@@ -207,7 +214,7 @@ thread_yield(Tid want_tid)
         }
         want_tid = ready_queue->head->node->tid;
     }
-    if(tid_list[want_tid] == EMPTY) {
+    if(state_list[want_tid] == EMPTY) {
         interrupts_set(last_state);
         return THREAD_INVALID;
     }
@@ -222,12 +229,12 @@ thread_yield(Tid want_tid)
             interrupts_set(last_state);
             return THREAD_INVALID;
         }
-        if(tid_list[current_tid] == RUNNING) {
-            tid_list[current_tid] = READY;
+        if(state_list[current_tid] == RUNNING) {
+            state_list[current_tid] = READY;
             push_to_end(ready_queue, current_thread);
         }
         set_current_thread(new_thread);
-        tid_list[want_tid] = RUNNING;
+        state_list[want_tid] = RUNNING;
         err = setcontext(&(current_thread->context));
         assert(!err);
     }
@@ -245,9 +252,12 @@ thread_exit()
     }
     Tid tid = thread_id();
     --active_thread_count;
-    tid_list[tid] = EXITED;
+    state_list[tid] = EXITED;
     push_to_end(exit_queue, current_thread);
 
+    if(wait_list[tid]->head->node != NULL) {
+        thread_wakeup(wait_list[tid], 1);
+    }
     thread_yield(THREAD_ANY);
     interrupts_set(last_state);
     return;
@@ -262,7 +272,7 @@ thread_kill(Tid tid)
         return THREAD_INVALID;
     }
 
-    enum state thread_state = tid_list[tid];
+    enum state thread_state = state_list[tid];
     switch(thread_state) {
         case RUNNING:
         case EMPTY: {
@@ -275,11 +285,8 @@ thread_kill(Tid tid)
             --active_thread_count;
         case EXITED: {
             struct thread *thread_to_kill = delete_node((thread_state == READY) ? ready_queue:exit_queue, tid);
-            assert(thread_to_kill != NULL);
-            tid_list[tid] = EMPTY;
-            free(thread_to_kill->stack_ptr);
-            free(thread_to_kill);
-            interrupts_set(last_state);
+            thread_destroy(thread_to_kill);
+        interrupts_set(last_state);
             return tid;
         }
         default:
@@ -299,10 +306,8 @@ wait_queue_create()
 {
     struct wait_queue *wq;
 
-    wq = malloc(sizeof(struct wait_queue));
+    wq = (struct wait_queue *)malloc(sizeof(struct wait_queue));
     assert(wq);
-
-    TBD();
 
     return wq;
 }
@@ -310,15 +315,28 @@ wait_queue_create()
 void
 wait_queue_destroy(struct wait_queue *wq)
 {
-    TBD();
+    if(wq == NULL) {
+        return;
+    }
+    struct thread_node *tmp_node = wq->head;
+    while(tmp_node != NULL) {
+        struct thread_node* next_node = tmp_node->next;
+        thread_destroy(tmp_node->node);
+        tmp_node->next = NULL;
+        free(tmp_node);
+        tmp_node = next_node;
+    }
     free(wq);
 }
 
 Tid
 thread_sleep(struct wait_queue *queue)
 {
-    TBD();
-    return THREAD_FAILED;
+    Tid current_tid = thread_id();
+    state_list[current_tid] = BLOCKED;
+    push_to_end(queue, current_thread);
+
+    return thread_yield(THREAD_ANY);
 }
 
 /* when the 'all' parameter is 1, wakeup all threads waiting in the queue.
@@ -326,16 +344,39 @@ thread_sleep(struct wait_queue *queue)
 int
 thread_wakeup(struct wait_queue *queue, int all)
 {
-    TBD();
-    return 0;
+    if(queue->head == NULL) {
+        free(queue);
+        return 0;
+    }
+    Tid head_tid = queue->head->node->tid;
+    if(!all) {
+        struct thread *thread_to_wakeup = delete_node(queue,head_tid);
+        state_list[head_tid] = READY;
+        push_to_end(ready_queue, thread_to_wakeup);
+        return 1;
+    } else{
+        int ret = (queue->head != NULL);
+        while(thread_wakeup(queue,0));
+        return ret;
+
+    }
 }
 
 /* suspend current thread until Thread tid exits */
 Tid
 thread_wait(Tid tid)
 {
-    TBD();
-    return 0;
+    int enabled = interrupts_off();
+    if(tid <= THREAD_SELF || tid >= THREAD_MAX_THREADS) {
+        interrupts_set(enabled);
+        return THREAD_INVALID;
+    }
+    if(state_list[tid] != READY && state_list[tid] != BLOCKED) {
+        interrupts_set(enabled);
+        return THREAD_INVALID;
+    }
+    interrupts_set(enabled);
+    return thread_sleep(wait_list[tid]);
 }
 
 struct lock {
