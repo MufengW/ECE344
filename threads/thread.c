@@ -332,16 +332,20 @@ wait_queue_destroy(struct wait_queue *wq)
 Tid
 thread_sleep(struct wait_queue *queue)
 {
+    int enabled = interrupts_off();
     if(queue == NULL) {
+        interrupts_set(enabled);
         return THREAD_INVALID;
     }
     if(active_thread_count == 1) {
+        interrupts_set(enabled);
         return THREAD_NONE;
     }
     Tid current_tid = thread_id();
     state_list[current_tid] = BLOCKED;
     push_to_end(queue, current_thread);
 
+    interrupts_set(enabled);
     return thread_yield(THREAD_ANY);
 }
 
@@ -350,23 +354,29 @@ thread_sleep(struct wait_queue *queue)
 int
 thread_wakeup(struct wait_queue *queue, int all)
 {
+    int enabled = interrupts_off();
+    int ret = 0;
     if(queue == NULL) {
-        return 0;
+        interrupts_set(enabled);
+        return ret;
     }
     if(queue->head == NULL) {
-        return 0;
+        interrupts_set(enabled);
+        return ret;
     }
     Tid head_tid = queue->head->node->tid;
     if(!all) {
         struct thread *thread_to_wakeup = delete_node(queue,head_tid);
         state_list[head_tid] = READY;
         push_to_end(ready_queue, thread_to_wakeup);
+        interrupts_set(enabled);
         return 1;
     } else{
-        int ret = (queue->head != NULL);
-        while(thread_wakeup(queue,0));
+        while(thread_wakeup(queue,0)) {
+            ++ret;
+        }
+        interrupts_set(enabled);
         return ret;
-
     }
 }
 
