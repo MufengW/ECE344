@@ -46,7 +46,12 @@ struct thread *current_thread;
 thread_queue *ready_queue;
 thread_queue *exit_queue;
 
-
+void wait_list_init() {
+	Tid tid = 0;
+	for(tid = 0; tid < THREAD_MAX_THREADS; ++tid) {
+		wait_list[tid] = wait_queue_create();
+	}
+}
 void set_current_thread(struct thread *t)
 {
     current_thread = t;
@@ -125,6 +130,7 @@ thread_init(void)
     state_list[0] = RUNNING;
     ++active_thread_count;
     set_current_thread(thread0);
+    wait_list_init();
 }
 
 Tid
@@ -169,7 +175,6 @@ thread_create(void (*fn) (void *), void *parg)
             int err = getcontext(&(new_thread->context));
             assert(!err);
             state_list[thread_id] = READY;
-            wait_list[thread_id] = wait_queue_create();
             ++active_thread_count;
             new_thread->stack_ptr = stack_pointer;
             new_thread->context.uc_stack.ss_sp = stack_pointer;
