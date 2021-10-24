@@ -388,7 +388,7 @@ thread_wakeup(struct wait_queue *queue, int all)
     if(!all) {
         struct thread *thread_to_wakeup = delete_node(queue,head_tid);
         state_list[head_tid] = READY;
-    parent_list[head_tid] = THREAD_NONE;
+        parent_list[head_tid] = THREAD_NONE;
         push_to_end(ready_queue, thread_to_wakeup);
         interrupts_set(enabled);
         return 1;
