@@ -15,7 +15,8 @@ enum state {
     EXITED
 };
 
-enum state state_list[THREAD_MAX_THREADS] = {EMPTY};
+enum state state_list[THREAD_MAX_THREADS];
+Tid parent_list[THREAD_MAX_THREADS];
 int active_thread_count = 0;
 
 /* This is the thread control block */
@@ -46,11 +47,14 @@ struct thread *current_thread;
 thread_queue *ready_queue;
 thread_queue *exit_queue;
 
-void wait_list_init() {
-	Tid tid = 0;
-	for(tid = 0; tid < THREAD_MAX_THREADS; ++tid) {
-		wait_list[tid] = wait_queue_create();
-	}
+void global_list_init() {
+    Tid tid = 0;
+    for(tid = 0; tid < THREAD_MAX_THREADS; ++tid) {
+        state_list[tid] = EMPTY;
+        wait_list[tid] = wait_queue_create();
+        parent_list[tid] = THREAD_NONE;
+
+    }
 }
 void set_current_thread(struct thread *t)
 {
@@ -113,6 +117,7 @@ struct thread *delete_node(thread_queue *queue, Tid tid_to_delete)
 void thread_destroy(struct thread *t) {
     Tid tid = t->tid;
     assert(t != NULL);
+    parent_list[tid] = THREAD_NONE;
     state_list[tid] = EMPTY;
     free(t->stack_ptr);
     free(t);
@@ -124,13 +129,13 @@ thread_init(void)
     /* your optional code here */
     ready_queue = (thread_queue *)malloc(sizeof(thread_queue));
     exit_queue = (thread_queue *)malloc(sizeof(thread_queue));
+    global_list_init();
     struct thread *thread0 = (struct thread*)malloc(sizeof(struct thread));    // kernel thread
     thread0->tid = 0;
     thread0->stack_ptr = malloc(THREAD_MIN_STACK);
     state_list[0] = RUNNING;
     ++active_thread_count;
     set_current_thread(thread0);
-    wait_list_init();
 }
 
 Tid
@@ -278,27 +283,34 @@ thread_kill(Tid tid)
     }
 
     enum state thread_state = state_list[tid];
+    thread_queue *queue = NULL;
     switch(thread_state) {
         case RUNNING:
         case EMPTY: {
             interrupts_set(last_state);
             return THREAD_INVALID;
         }
-        case BLOCKED:
-            break;
-        case READY:
+        case BLOCKED: {
             --active_thread_count;
+            queue = wait_list[parent_list[tid]];
+            break;
+        }
+        case READY: {
+            --active_thread_count;
+        queue = ready_queue;
+            break;
+        }
         case EXITED: {
-            struct thread *thread_to_kill = delete_node((thread_state == READY) ? ready_queue:exit_queue, tid);
-            thread_destroy(thread_to_kill);
-        interrupts_set(last_state);
-            return tid;
+            queue = exit_queue;
+            break;
         }
         default:
             break;
     }
+    struct thread *thread_to_kill = delete_node(queue, tid);
+    thread_destroy(thread_to_kill);
     interrupts_set(last_state);
-    return THREAD_FAILED;
+    return tid;
 }
 
 /*******************************************************************
@@ -349,9 +361,12 @@ thread_sleep(struct wait_queue *queue)
     Tid current_tid = thread_id();
     state_list[current_tid] = BLOCKED;
     push_to_end(queue, current_thread);
-
     interrupts_set(enabled);
-    return thread_yield(THREAD_ANY);
+    Tid ret = thread_yield(THREAD_ANY);
+    if(ret != THREAD_INVALID) {
+        return ret;
+    }
+    exit(0);
 }
 
 /* when the 'all' parameter is 1, wakeup all threads waiting in the queue.
@@ -373,6 +388,7 @@ thread_wakeup(struct wait_queue *queue, int all)
     if(!all) {
         struct thread *thread_to_wakeup = delete_node(queue,head_tid);
         state_list[head_tid] = READY;
+    parent_list[head_tid] = THREAD_NONE;
         push_to_end(ready_queue, thread_to_wakeup);
         interrupts_set(enabled);
         return 1;
@@ -390,6 +406,7 @@ Tid
 thread_wait(Tid tid)
 {
     int enabled = interrupts_off();
+    Tid current_tid = thread_id();
     if(tid <= THREAD_SELF || tid >= THREAD_MAX_THREADS) {
         interrupts_set(enabled);
         return THREAD_INVALID;
@@ -398,8 +415,10 @@ thread_wait(Tid tid)
         interrupts_set(enabled);
         return THREAD_INVALID;
     }
+    parent_list[current_tid] = tid;
+    thread_sleep(wait_list[tid]);
     interrupts_set(enabled);
-    return thread_sleep(wait_list[tid]);
+    return tid;
 }
 
 struct lock {
