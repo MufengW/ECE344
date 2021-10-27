@@ -179,6 +179,7 @@ thread_create(void (*fn) (void *), void *parg)
             }
             int err = getcontext(&(new_thread->context));
             assert(!err);
+
             state_list[thread_id] = READY;
             ++active_thread_count;
             new_thread->stack_ptr = stack_pointer;
@@ -423,6 +424,8 @@ thread_wait(Tid tid)
 
 struct lock {
     /* ... Fill this in ... */
+	struct wait_queue *queue;
+	bool in_use;
 };
 
 struct lock *
@@ -433,7 +436,8 @@ lock_create()
     lock = malloc(sizeof(struct lock));
     assert(lock);
 
-    TBD();
+    lock->queue = wait_queue_create();
+    lock->in_use = false;
 
     return lock;
 }
@@ -443,7 +447,7 @@ lock_destroy(struct lock *lock)
 {
     assert(lock != NULL);
 
-    TBD();
+    wait_queue_destroy(lock->queue);
 
     free(lock);
 }
@@ -453,7 +457,13 @@ lock_acquire(struct lock *lock)
 {
     assert(lock != NULL);
 
-    TBD();
+    interrupts_off();
+
+    while(lock->in_use) {
+	    thread_sleep(lock->queue);
+    }
+    lock->in_use = true;
+    interrupts_on();
 }
 
 void
@@ -461,7 +471,13 @@ lock_release(struct lock *lock)
 {
     assert(lock != NULL);
 
-    TBD();
+    interrupts_off();
+
+    lock->in_use = false;
+
+    thread_wakeup(lock->queue, 1);
+
+    interrupts_on();
 }
 
 struct cv {
