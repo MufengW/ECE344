@@ -25,6 +25,7 @@ struct thread {
     Tid tid;
     //State state;
     void* stack_ptr;
+    bool holding_lock;
     ucontext_t context;
 };
 
@@ -132,6 +133,7 @@ thread_init(void)
     global_list_init();
     struct thread *thread0 = (struct thread*)malloc(sizeof(struct thread));    // kernel thread
     thread0->tid = 0;
+    thread0->holding_lock = false;
     thread0->stack_ptr = malloc(THREAD_MIN_STACK);
     state_list[0] = RUNNING;
     ++active_thread_count;
@@ -171,6 +173,7 @@ thread_create(void (*fn) (void *), void *parg)
                 return THREAD_NOMEMORY;
             }
             new_thread->tid = thread_id;
+            new_thread->holding_lock = false;
             void *stack_pointer = malloc(THREAD_MIN_STACK);
             if(stack_pointer == NULL) {
                 free(new_thread);
@@ -424,8 +427,8 @@ thread_wait(Tid tid)
 
 struct lock {
     /* ... Fill this in ... */
-	struct wait_queue *queue;
-	bool in_use;
+    struct wait_queue *queue;
+    bool in_use;
 };
 
 struct lock *
@@ -448,7 +451,6 @@ lock_destroy(struct lock *lock)
     assert(lock != NULL);
 
     wait_queue_destroy(lock->queue);
-
     free(lock);
 }
 
@@ -459,10 +461,18 @@ lock_acquire(struct lock *lock)
 
     interrupts_off();
 
-    while(lock->in_use) {
-	    thread_sleep(lock->queue);
+    if(current_thread->holding_lock) {
+        interrupts_on();
+        return;
     }
+
+    while(lock->in_use) {
+        thread_sleep(lock->queue);
+    }
+
     lock->in_use = true;
+    current_thread->holding_lock = true;
+
     interrupts_on();
 }
 
@@ -473,8 +483,13 @@ lock_release(struct lock *lock)
 
     interrupts_off();
 
-    lock->in_use = false;
+    if(!current_thread->holding_lock) {
+        interrupts_on();
+        return;
+    }
 
+    lock->in_use = false;
+    current_thread->holding_lock = false;
     thread_wakeup(lock->queue, 1);
 
     interrupts_on();
@@ -482,6 +497,7 @@ lock_release(struct lock *lock)
 
 struct cv {
     /* ... Fill this in ... */
+    struct wait_queue *queue;
 };
 
 struct cv *
@@ -492,8 +508,7 @@ cv_create()
     cv = malloc(sizeof(struct cv));
     assert(cv);
 
-    TBD();
-
+    cv->queue = wait_queue_create();
     return cv;
 }
 
@@ -502,8 +517,7 @@ cv_destroy(struct cv *cv)
 {
     assert(cv != NULL);
 
-    TBD();
-
+    wait_queue_destroy(cv->queue);
     free(cv);
 }
 
@@ -513,7 +527,9 @@ cv_wait(struct cv *cv, struct lock *lock)
     assert(cv != NULL);
     assert(lock != NULL);
 
-    TBD();
+    lock_release(lock);
+    thread_sleep(cv->queue);
+    lock_acquire(lock);
 }
 
 void
@@ -522,7 +538,9 @@ cv_signal(struct cv *cv, struct lock *lock)
     assert(cv != NULL);
     assert(lock != NULL);
 
-    TBD();
+    lock_acquire(lock);
+    thread_wakeup(cv->queue, 0);
+    lock_release(lock);
 }
 
 void
@@ -531,5 +549,7 @@ cv_broadcast(struct cv *cv, struct lock *lock)
     assert(cv != NULL);
     assert(lock != NULL);
 
-    TBD();
+    lock_acquire(lock);
+    thread_wakeup(cv->queue, 1);
+    lock_release(lock);
 }
