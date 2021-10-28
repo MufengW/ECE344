@@ -23,7 +23,6 @@ int active_thread_count = 0;
 struct thread {
     /* ... Fill this in ... */
     Tid tid;
-    //State state;
     void* stack_ptr;
     bool holding_lock;
     ucontext_t context;
@@ -42,7 +41,7 @@ struct wait_queue {
 
 typedef struct wait_queue thread_queue;
 
-struct wait_queue *wait_list[THREAD_MAX_THREADS] = {NULL};
+struct wait_queue *wait_list[THREAD_MAX_THREADS];
 
 struct thread *current_thread;
 thread_queue *ready_queue;
@@ -157,7 +156,7 @@ thread_stub(void (*thread_main)(void *), void *arg)
 Tid
 thread_create(void (*fn) (void *), void *parg)
 {
-    int last_state = interrupts_off();
+    int enabled = interrupts_off();
     Tid thread_id;
     for (thread_id = 0; thread_id < THREAD_MAX_THREADS; ++thread_id){
         if(state_list[thread_id] == EXITED) {
@@ -169,7 +168,7 @@ thread_create(void (*fn) (void *), void *parg)
             // found empty slot
             struct thread *new_thread = (struct thread *)malloc(sizeof(struct thread));
             if(new_thread == NULL) {
-                interrupts_set(last_state);
+                interrupts_set(enabled);
                 return THREAD_NOMEMORY;
             }
             new_thread->tid = thread_id;
@@ -177,7 +176,7 @@ thread_create(void (*fn) (void *), void *parg)
             void *stack_pointer = malloc(THREAD_MIN_STACK);
             if(stack_pointer == NULL) {
                 free(new_thread);
-                interrupts_set(last_state);
+                interrupts_set(enabled);
                 return THREAD_NOMEMORY;
             }
             int err = getcontext(&(new_thread->context));
@@ -193,18 +192,18 @@ thread_create(void (*fn) (void *), void *parg)
             new_thread->context.uc_mcontext.gregs[REG_RSI] = (long long int)parg;
 
             push_to_end(ready_queue, new_thread);
-            interrupts_set(last_state);
+            interrupts_set(enabled);
             return thread_id;
         }
     }
-    interrupts_set(last_state);
+    interrupts_set(enabled);
     return THREAD_NOMORE;
 }
 
 Tid
 thread_yield(Tid want_tid)
 {
-    int last_state = interrupts_off();
+    int enabled = interrupts_off();
     int current_tid = thread_id();
     struct thread_node *tmp;
     for(tmp = exit_queue->head; tmp != NULL && tmp->next != NULL; tmp = tmp->next) {
@@ -213,23 +212,23 @@ thread_yield(Tid want_tid)
         }
     }
     if(want_tid < THREAD_SELF || want_tid > THREAD_MAX_THREADS) {
-        interrupts_set(last_state);
+        interrupts_set(enabled);
         return THREAD_INVALID;
     }
     if(want_tid == THREAD_SELF || want_tid == current_tid) {
-        interrupts_set(last_state);
+        interrupts_set(enabled);
         return current_tid;
     }
     if(want_tid == THREAD_ANY) {
         if(ready_queue->head == NULL) {
             // ready queue empty
-            interrupts_set(last_state);
+            interrupts_set(enabled);
             return THREAD_NONE;
         }
         want_tid = ready_queue->head->node->tid;
     }
     if(state_list[want_tid] == EMPTY) {
-        interrupts_set(last_state);
+        interrupts_set(enabled);
         return THREAD_INVALID;
     }
     volatile bool context_is_called = false;
@@ -240,7 +239,7 @@ thread_yield(Tid want_tid)
         context_is_called = true;
         struct thread *new_thread = delete_node(ready_queue, want_tid);
         if(new_thread == NULL) {
-            interrupts_set(last_state);
+            interrupts_set(enabled);
             return THREAD_INVALID;
         }
         if(state_list[current_tid] == RUNNING) {
@@ -252,16 +251,16 @@ thread_yield(Tid want_tid)
         err = setcontext(&(current_thread->context));
         assert(!err);
     }
-    interrupts_set(last_state);
+    interrupts_set(enabled);
     return want_tid;
 }
 
 void
 thread_exit()
 {
-    int last_state = interrupts_off();
+    int enabled = interrupts_off();
     if(active_thread_count == 1) {
-        interrupts_set(last_state);
+        interrupts_set(enabled);
         exit(0);
     }
     Tid tid = thread_id();
@@ -269,20 +268,18 @@ thread_exit()
     state_list[tid] = EXITED;
     push_to_end(exit_queue, current_thread);
 
-    if(wait_list[tid] != NULL) {
-        thread_wakeup(wait_list[tid], 1);
-    }
+    thread_wakeup(wait_list[tid], 1);
     thread_yield(THREAD_ANY);
-    interrupts_set(last_state);
+    interrupts_set(enabled);
     return;
 }
 
 Tid
 thread_kill(Tid tid)
 {
-    int last_state = interrupts_off();
+    int enabled = interrupts_off();
     if(tid <= THREAD_ANY || tid >= THREAD_MAX_THREADS) {
-        interrupts_set(last_state);
+        interrupts_set(enabled);
         return THREAD_INVALID;
     }
 
@@ -291,7 +288,7 @@ thread_kill(Tid tid)
     switch(thread_state) {
         case RUNNING:
         case EMPTY: {
-            interrupts_set(last_state);
+            interrupts_set(enabled);
             return THREAD_INVALID;
         }
         case BLOCKED: {
@@ -313,7 +310,7 @@ thread_kill(Tid tid)
     }
     struct thread *thread_to_kill = delete_node(queue, tid);
     thread_destroy(thread_to_kill);
-    interrupts_set(last_state);
+    interrupts_set(enabled);
     return tid;
 }
 
@@ -341,7 +338,7 @@ wait_queue_destroy(struct wait_queue *wq)
     }
     struct thread_node *tmp_node = wq->head;
     while(tmp_node != NULL) {
-        struct thread_node* next_node = tmp_node->next;
+        struct thread_node *next_node = tmp_node->next;
         thread_destroy(tmp_node->node);
         tmp_node->next = NULL;
         free(tmp_node);
