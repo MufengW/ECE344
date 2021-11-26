@@ -4,7 +4,7 @@
 struct server;
 
 struct server *server_init(int nr_threads, int max_requests, 
-			   int max_cache_size);
+               int max_cache_size);
 void server_request(struct server *sv, int connfd);
 void server_exit(struct server *sv);
 

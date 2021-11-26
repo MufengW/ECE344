@@ -29,38 +29,38 @@
 #define __STR(n) #n
 #define STR(n) __STR(n)
 
-#define TBD() do {							\
-		printf("%s:%d: %s: please implement this functionality\n", \
-		       __FILE__, __LINE__, __FUNCTION__);		\
-		exit(1);						\
-	} while (0)
+#define TBD() do {                            \
+        printf("%s:%d: %s: please implement this functionality\n", \
+               __FILE__, __LINE__, __FUNCTION__);        \
+        exit(1);                        \
+    } while (0)
 
 /* use for system calls */
-#define SYS(code)							\
-	do {								\
-		if ((code) < 0)	{					\
-			fprintf(stderr, "%s: line %d: %s: %s\n",	\
-				__FUNCTION__, __LINE__, STR(code),	\
-				strerror(errno));			\
-			exit(1);					\
-		}							\
-	} while (0)
+#define SYS(code)                            \
+    do {                                \
+        if ((code) < 0)    {                    \
+            fprintf(stderr, "%s: line %d: %s: %s\n",    \
+                __FUNCTION__, __LINE__, STR(code),    \
+                strerror(errno));            \
+            exit(1);                    \
+        }                            \
+    } while (0)
 
 /* use for gethostbyname/addr */
-#define DNS(code)							\
-	do {								\
-		if ((code) == NULL) {					\
-			fprintf(stderr, "%s: line %d: %s: DNS error %d\n", \
-				__FUNCTION__, __LINE__, STR(code), h_errno); \
-			exit(1);					\
-		}							\
-	} while (0)
+#define DNS(code)                            \
+    do {                                \
+        if ((code) == NULL) {                    \
+            fprintf(stderr, "%s: line %d: %s: DNS error %d\n", \
+                __FUNCTION__, __LINE__, STR(code), h_errno); \
+            exit(1);                    \
+        }                            \
+    } while (0)
 
 
 /* Misc constants */
-#define MAXLINE  8192	/* max text line length */
-#define MAXBUF   8192	/* max I/O buffer size */
-#define LISTENQ  1024	/* second argument to listen() */
+#define MAXLINE  8192    /* max text line length */
+#define MAXBUF   8192    /* max I/O buffer size */
+#define LISTENQ  1024    /* second argument to listen() */
 
 /* Memory managment wrappers */
 void *Malloc(size_t size);
