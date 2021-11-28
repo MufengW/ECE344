@@ -10,6 +10,15 @@ struct server {
     /* add any other parameters you need */
     pthread_t **worker_threads;
     int *buf;
+    struct cache *cache;
+};
+
+struct cache {
+    struct node **entry;
+};
+
+struct node {
+    struct file_data *data;
 };
 
 pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
@@ -23,6 +32,25 @@ int request_count = 0;
 void request_main_loop();
 void update_request_count();
 void increment();
+void server_destory(struct server *sv);
+void cache_destroy_all(struct server *sv);
+void thread_destroy_all(struct server *sv);
+struct cache *cache_init(int max_cache_size);
+
+
+struct cache *cache_init(int max_cache_size) {
+    struct cache *cache = (struct cache*) Malloc(sizeof(struct cache));
+    memset(cache, 0, sizeof(struct cache));
+
+    assert(cache);
+
+    cache->entry = (struct node **)Malloc(sizeof(struct node *) * max_cache_size);
+    memset(cache->entry, 0, sizeof(struct node *) * max_cache_size);
+    for(int i = 0; i < max_cache_size; ++i) {
+        cache->entry[i]->data = (struct file_data *)Malloc(sizeof(struct file_data));
+    }
+    return cache;
+}
 
 /* initialize file data */
 static struct file_data *
@@ -96,6 +124,7 @@ server_init(int nr_threads, int max_requests, int max_cache_size)
             sv->worker_threads[i] = (pthread_t *)malloc(sizeof(pthread_t));
             pthread_create(sv->worker_threads[i], NULL, (void *)&request_main_loop, sv);
         }
+    sv->cache = cache_init(max_cache_size);
     }
     buf_write_idx = 0;
     buf_read_idx = 0;
@@ -172,6 +201,22 @@ server_request(struct server *sv, int connfd)
     }
 }
 
+void cache_destroy_all(struct server *sv) {
+    for(int i = 0; i < sv->max_cache_size; ++i) {
+        if(sv->cache->entry[i]->data != NULL) {
+            free(sv->cache->entry[i]->data);
+            free(sv->cache->entry[i]);
+        }
+    }
+    free(sv->cache);
+}
+
+void server_destroy(struct server *sv) {
+    thread_destroy_all(sv);
+    cache_destroy_all(sv);
+
+}
+
 void
 server_exit(struct server *sv)
 {
@@ -183,7 +228,7 @@ server_exit(struct server *sv)
     pthread_cond_broadcast(&empty);
     pthread_cond_broadcast(&full);
 
-    thread_destroy_all(sv);
+    server_destroy(sv);
     free(sv->buf);
 
     /* make sure to free any allocated resources */
