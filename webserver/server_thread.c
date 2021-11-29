@@ -76,7 +76,6 @@ bool cache_lookup(struct server *sv, struct file_data *data) {
 }
 
 void cache_insert(struct server *sv, struct file_data *data) {
-    pthread_mutex_lock(&request_lock);
     if(sv->cache->current_size == sv->max_cache_size) {
         cache_evict(sv, sv->max_cache_size / 5);
     }
@@ -90,7 +89,6 @@ void cache_insert(struct server *sv, struct file_data *data) {
     memset(sv->cache->entry[hash_idx], 0, sizeof(struct node));
     cache_add(data, sv->cache->entry[hash_idx]);
     ++(sv->cache->current_size);
-    pthread_mutex_unlock(&request_lock);
     return;
 }
 
@@ -131,20 +129,15 @@ void cache_free(struct node *entry) {
 }
 
 void cache_evict(struct server *sv, int amount_to_evict) {
-//	for(int i = 0; i < sv->max_cache_size; ++i) {
-//		if(sv->cache->entry[i] != NULL) {
-//			printf("%d: %d\n", i, sv->cache->entry[i]->request_count);
-//		}
-//	}
     int evict_count = 0;
     for(int i = 0; i < sv->max_cache_size; ++i) {
-        if(evict_count < amount_to_evict &&
-            sv->cache->entry[i] != NULL &&
+//        if(evict_count < amount_to_evict &&
+            if(sv->cache->entry[i] != NULL &&
 	  (sv->cache->entry[i]->request_count < max_request_count/4 ||
 	    sv->cache->entry[i]->request_count == 0)) {
             cache_free(sv->cache->entry[i]);
             sv->cache->entry[i] = NULL;
-            printf("data at %d evicted\n", i);
+            //printf("data at %d evicted\n", i);
             ++evict_count;
             --(sv->cache->current_size);
         }
@@ -154,7 +147,7 @@ void cache_evict(struct server *sv, int amount_to_evict) {
 		    sv->cache->entry[i]->request_count = 0;
 	    }
     }
-    printf("evict %d caches, now size is %d...\n\n", evict_count, sv->cache->current_size);
+    //printf("evict %d caches, now size is %d...\n\n", evict_count, sv->cache->current_size);
 }
 
 struct cache *cache_init(int max_cache_size) {
@@ -219,20 +212,26 @@ do_server_request(struct server *sv, int connfd)
         file_data_free(data);
         return;
     }
+    pthread_mutex_lock(&request_lock);
     if(sv->cache != NULL && cache_lookup(sv, data)) {
+	    pthread_mutex_unlock(&request_lock);
         // if found data in matcing the file name in cache then data is updated in rq->data
-    printf("found!\n");
-            goto send;
+        //printf("found!\n");
+        goto send;
     } else {
         // cache not found, need to request to read
         /* read file,
          * fills data->file_buf with the file contents,
          * data->file_size with file size. */
+	pthread_mutex_unlock(&request_lock);
+	//printf("not found!\n");
         ret = request_readfile(rq);
         if (ret == 0) { /* couldn't read file */
             goto out;
         }
+	pthread_mutex_lock(&request_lock);
         if(sv->cache != NULL) cache_insert(sv, data);
+	pthread_mutex_unlock(&request_lock);
     }
     /* send file to client */
 send:
