@@ -66,8 +66,8 @@ bool cache_lookup(struct server *sv, struct file_data *data) {
         data->file_buf = Malloc(found_data->file_size);
         memcpy(data->file_buf, found_data->file_buf, found_data->file_size);
         data->file_size = found_data->file_size;
-    ++sv->cache->entry[hash_idx]->request_count;
-    if(max_request_count < sv->cache->entry[hash_idx]->request_count) {
+        ++sv->cache->entry[hash_idx]->request_count;
+        if(max_request_count < sv->cache->entry[hash_idx]->request_count) {
         max_request_count = sv->cache->entry[hash_idx]->request_count;
     }
         return true;
@@ -78,23 +78,18 @@ bool cache_lookup(struct server *sv, struct file_data *data) {
 void cache_insert(struct server *sv, struct file_data *data) {
     pthread_mutex_lock(&request_lock);
     if(sv->cache->current_size == sv->max_cache_size) {
-        cache_evict(sv, sv->max_cache_size / 3);
+        cache_evict(sv, sv->max_cache_size / 5);
     }
-    printf("now size is %d, insert data %s...\n", sv->cache->current_size, data->file_name);
     char *name = data->file_name;
     unsigned long key = get_key(name);
     int hash_idx = key % sv->max_cache_size;
-    printf("hash idx = %d\n",hash_idx);
     while(sv->cache->entry[hash_idx] != NULL) {
         hash_idx = (hash_idx + 1) % sv->max_cache_size;
-      //  printf("next...\n");
     }
     sv->cache->entry[hash_idx] = (struct node *)Malloc(sizeof(struct node));
     memset(sv->cache->entry[hash_idx], 0, sizeof(struct node));
     cache_add(data, sv->cache->entry[hash_idx]);
-    printf("on index %d...\n", hash_idx);
-    ++sv->cache->current_size;
-    printf("current size is %d\n", sv->cache->current_size);
+    ++(sv->cache->current_size);
     pthread_mutex_unlock(&request_lock);
     return;
 }
@@ -105,7 +100,6 @@ void cache_add(struct file_data *data, struct node *entry) {
 
     entry->data = copy_file_data(data);
     entry->request_count = 0;
-    printf("adding data %s", data->file_name);
 }
 
 struct file_data *copy_file_data(struct file_data *data) {
@@ -137,22 +131,30 @@ void cache_free(struct node *entry) {
 }
 
 void cache_evict(struct server *sv, int amount_to_evict) {
+//	for(int i = 0; i < sv->max_cache_size; ++i) {
+//		if(sv->cache->entry[i] != NULL) {
+//			printf("%d: %d\n", i, sv->cache->entry[i]->request_count);
+//		}
+//	}
     int evict_count = 0;
-    printf("evicting %d data\n", amount_to_evict);
     for(int i = 0; i < sv->max_cache_size; ++i) {
         if(evict_count < amount_to_evict &&
             sv->cache->entry[i] != NULL &&
-            sv->cache->entry[i]->request_count < max_request_count) {
+	  (sv->cache->entry[i]->request_count < max_request_count/4 ||
+	    sv->cache->entry[i]->request_count == 0)) {
             cache_free(sv->cache->entry[i]);
             sv->cache->entry[i] = NULL;
             printf("data at %d evicted\n", i);
             ++evict_count;
-            --sv->cache->current_size;
-        } else {
-            break;
+            --(sv->cache->current_size);
         }
     }
-    printf("evict %d caches, now size is %d...\n\n", amount_to_evict, sv->cache->current_size);
+    for(int i = 0; i < sv->max_cache_size; ++i) {
+	    if(sv->cache->entry[i] != NULL) {
+		    sv->cache->entry[i]->request_count = 0;
+	    }
+    }
+    printf("evict %d caches, now size is %d...\n\n", evict_count, sv->cache->current_size);
 }
 
 struct cache *cache_init(int max_cache_size) {
