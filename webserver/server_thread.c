@@ -25,7 +25,7 @@ struct node {
 };
 
 pthread_mutex_t queue_lock = PTHREAD_MUTEX_INITIALIZER;
-pthread_mutex_t request_lock = PTHREAD_MUTEX_INITIALIZER;
+pthread_mutex_t cache_lock = PTHREAD_MUTEX_INITIALIZER;
 pthread_cond_t full = PTHREAD_COND_INITIALIZER;
 pthread_cond_t empty = PTHREAD_COND_INITIALIZER;
 int buf_write_idx = 0;
@@ -212,9 +212,9 @@ do_server_request(struct server *sv, int connfd)
         file_data_free(data);
         return;
     }
-    pthread_mutex_lock(&request_lock);
+    pthread_mutex_lock(&cache_lock);
     if(sv->cache != NULL && cache_lookup(sv, data)) {
-	    pthread_mutex_unlock(&request_lock);
+	    pthread_mutex_unlock(&cache_lock);
         // if found data in matcing the file name in cache then data is updated in rq->data
         //printf("found!\n");
         goto send;
@@ -223,15 +223,15 @@ do_server_request(struct server *sv, int connfd)
         /* read file,
          * fills data->file_buf with the file contents,
          * data->file_size with file size. */
-	pthread_mutex_unlock(&request_lock);
+	pthread_mutex_unlock(&cache_lock);
 	//printf("not found!\n");
         ret = request_readfile(rq);
         if (ret == 0) { /* couldn't read file */
             goto out;
         }
-	pthread_mutex_lock(&request_lock);
+	pthread_mutex_lock(&cache_lock);
         if(sv->cache != NULL) cache_insert(sv, data);
-	pthread_mutex_unlock(&request_lock);
+	pthread_mutex_unlock(&cache_lock);
     }
     /* send file to client */
 send:
@@ -340,9 +340,9 @@ server_request(struct server *sv, int connfd)
 
 void cache_destroy_all(struct server *sv) {
     for(int i = 0; i < sv->max_cache_size; ++i) {
-        if(sv->cache->entry[i]->data != NULL) {
-            free(sv->cache->entry[i]->data);
-            free(sv->cache->entry[i]);
+        if(sv->cache->entry[i] != NULL) {
+		cache_free(sv->cache->entry[i]);
+		sv->cache->entry[i] = NULL;
         }
     }
     free(sv->cache);
