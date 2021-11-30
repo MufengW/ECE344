@@ -22,10 +22,11 @@ struct cache {
 struct node {
     struct file_data *data;
     int request_count;
+    bool in_use;
+    bool in_op;
 };
 
 pthread_mutex_t queue_lock = PTHREAD_MUTEX_INITIALIZER;
-pthread_mutex_t cache_lock = PTHREAD_MUTEX_INITIALIZER;
 pthread_cond_t full = PTHREAD_COND_INITIALIZER;
 pthread_cond_t empty = PTHREAD_COND_INITIALIZER;
 int buf_write_idx = 0;
@@ -53,23 +54,26 @@ unsigned long get_key(char *file_name);
 bool cache_lookup(struct server *sv, struct file_data *data) {
     char *name = data->file_name;
     unsigned long key = get_key(name);
-    int hash_idx = key %sv->max_cache_size;
+    int hash_idx = key % sv->max_cache_size;
     int counter = 0;
     while(counter < sv->max_cache_size) {
-        if(sv->cache->entry[hash_idx] == NULL ||
+        if(!(sv->cache->entry[hash_idx]->in_use) ||
                 strcmp(sv->cache->entry[hash_idx]->data->file_name, name) != 0) {
+            // not at this index, move on
             hash_idx = (hash_idx + 1) % sv->max_cache_size;
             ++counter;
             continue;
         }
+        // found
         struct file_data *found_data = sv->cache->entry[hash_idx]->data;
         data->file_buf = Malloc(found_data->file_size);
         memcpy(data->file_buf, found_data->file_buf, found_data->file_size);
         data->file_size = found_data->file_size;
-        ++sv->cache->entry[hash_idx]->request_count;
+        ++(sv->cache->entry[hash_idx]->request_count);
+
         if(max_request_count < sv->cache->entry[hash_idx]->request_count) {
-        max_request_count = sv->cache->entry[hash_idx]->request_count;
-    }
+            max_request_count = sv->cache->entry[hash_idx]->request_count;
+        }
         return true;
     }
     return false;
@@ -82,20 +86,18 @@ void cache_insert(struct server *sv, struct file_data *data) {
     char *name = data->file_name;
     unsigned long key = get_key(name);
     int hash_idx = key % sv->max_cache_size;
-    while(sv->cache->entry[hash_idx] != NULL) {
+    while(sv->cache->entry[hash_idx]->in_use) {
         hash_idx = (hash_idx + 1) % sv->max_cache_size;
     }
-    sv->cache->entry[hash_idx] = (struct node *)Malloc(sizeof(struct node));
-    memset(sv->cache->entry[hash_idx], 0, sizeof(struct node));
     cache_add(data, sv->cache->entry[hash_idx]);
     ++(sv->cache->current_size);
     return;
 }
 
 void cache_add(struct file_data *data, struct node *entry) {
-    entry->data = Malloc(sizeof(struct file_data));
+    entry->in_use = true;
+    entry->data = (struct file_data *)Malloc(sizeof(struct file_data));
     memset(entry->data, 0, sizeof(struct file_data));
-
     entry->data = copy_file_data(data);
     entry->request_count = 0;
 }
@@ -116,6 +118,7 @@ struct file_data *copy_file_data(struct file_data *data) {
 }
 
 void cache_free(struct node *entry) {
+    entry->in_use = false;
     free(entry->data->file_name);
     entry->data->file_name = NULL;
 
@@ -124,28 +127,21 @@ void cache_free(struct node *entry) {
 
     free(entry->data);
     entry->data = NULL;
-
-    free(entry);
 }
 
 void cache_evict(struct server *sv, int amount_to_evict) {
     int evict_count = 0;
     for(int i = 0; i < sv->max_cache_size; ++i) {
-//        if(evict_count < amount_to_evict &&
-            if(sv->cache->entry[i] != NULL &&
-	  (sv->cache->entry[i]->request_count < max_request_count/4 ||
-	    sv->cache->entry[i]->request_count == 0)) {
-            cache_free(sv->cache->entry[i]);
-            sv->cache->entry[i] = NULL;
-            //printf("data at %d evicted\n", i);
-            ++evict_count;
-            --(sv->cache->current_size);
+        if(evict_count < amount_to_evict && sv->cache->entry[i]->in_use) {
+            if(sv->cache->entry[i]->request_count == 0 ||
+                    sv->cache->entry[i]->request_count < max_request_count / 4) {
+                // this one needs to be evicted
+                cache_free(sv->cache->entry[i]);
+                ++evict_count;
+                --(sv->cache->current_size);
+            }
+        sv->cache->entry[i]->request_count = 0;
         }
-    }
-    for(int i = 0; i < sv->max_cache_size; ++i) {
-	    if(sv->cache->entry[i] != NULL) {
-		    sv->cache->entry[i]->request_count = 0;
-	    }
     }
     //printf("evict %d caches, now size is %d...\n\n", evict_count, sv->cache->current_size);
 }
@@ -157,9 +153,11 @@ struct cache *cache_init(int max_cache_size) {
     cache->entry = (struct node **)Malloc(sizeof(struct node *) * max_cache_size);
     memset(cache->entry, 0, sizeof(struct node *) * max_cache_size);
     for(int i = 0; i < max_cache_size; ++i) {
-        cache->entry[i] = NULL;
-//        cache->entry[i] = (struct node *)Malloc(sizeof(struct node));
-//    memset(cache->entry[i], 0, sizeof(struct node));
+        cache->entry[i] = (struct node *)Malloc(sizeof(struct node));
+        memset(cache->entry[i], 0, sizeof(struct node));
+    cache->entry[i]->in_use = false;
+    cache->entry[i]->in_op = false;
+    cache->entry[i]->data = (struct file_data *)Malloc(sizeof(struct file_data));
     }
     cache->current_size = 0;
     max_request_count = 0;
@@ -212,9 +210,7 @@ do_server_request(struct server *sv, int connfd)
         file_data_free(data);
         return;
     }
-    pthread_mutex_lock(&cache_lock);
     if(sv->cache != NULL && cache_lookup(sv, data)) {
-	    pthread_mutex_unlock(&cache_lock);
         // if found data in matcing the file name in cache then data is updated in rq->data
         //printf("found!\n");
         goto send;
@@ -223,15 +219,12 @@ do_server_request(struct server *sv, int connfd)
         /* read file,
          * fills data->file_buf with the file contents,
          * data->file_size with file size. */
-	pthread_mutex_unlock(&cache_lock);
-	//printf("not found!\n");
+    //printf("not found!\n");
         ret = request_readfile(rq);
         if (ret == 0) { /* couldn't read file */
             goto out;
         }
-	pthread_mutex_lock(&cache_lock);
         if(sv->cache != NULL) cache_insert(sv, data);
-	pthread_mutex_unlock(&cache_lock);
     }
     /* send file to client */
 send:
@@ -258,11 +251,11 @@ server_init(int nr_threads, int max_requests, int max_cache_size)
     sv->buf = (int *)malloc(buf_size * sizeof(int));
     if (nr_threads > 0 || max_requests > 0 || max_cache_size > 0) {
         sv->worker_threads = (pthread_t **)malloc(nr_threads * sizeof(pthread_t *));
+    if(max_cache_size > 0) sv->cache = cache_init(max_cache_size);
         for(int i = 0; i < nr_threads; ++i) {
             sv->worker_threads[i] = (pthread_t *)malloc(sizeof(pthread_t));
             pthread_create(sv->worker_threads[i], NULL, (void *)&request_main_loop, sv);
         }
-        if(max_cache_size > 0) sv->cache = cache_init(max_cache_size);
     }
     buf_write_idx = 0;
     buf_read_idx = 0;
@@ -340,12 +333,15 @@ server_request(struct server *sv, int connfd)
 
 void cache_destroy_all(struct server *sv) {
     for(int i = 0; i < sv->max_cache_size; ++i) {
-        if(sv->cache->entry[i] != NULL) {
-		cache_free(sv->cache->entry[i]);
-		sv->cache->entry[i] = NULL;
+        if(sv->cache->entry[i]->in_use) {
+            cache_free(sv->cache->entry[i]);
         }
+        free(sv->cache->entry[i]);
     }
+    free(sv->cache->entry);
+    sv->cache->entry = NULL;
     free(sv->cache);
+    sv->cache = NULL;
 }
 
 void server_destroy(struct server *sv) {
