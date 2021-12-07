@@ -1,8 +1,10 @@
+#define _GNU_SOURCE
 #include "request.h"
 #include "server_thread.h"
 #include "common.h"
 #include <stdbool.h>
-
+#include <limits.h>
+#include <stdatomic.h>
 struct server {
     int nr_threads;
     int max_requests;
@@ -16,166 +18,53 @@ struct server {
 
 struct cache {
     struct node **entry;
-    int current_size;
 };
 
 struct node {
     struct file_data *data;
-    int request_count;
-    bool in_use;
-    bool in_op;
+    struct node *next;
 };
 
+#define TABLE_SIZE 4999
+
+int in_evict = 0;
+atomic_int current_cache_size = 0;
+int ref_count[TABLE_SIZE];
+int request_count[TABLE_SIZE];
 pthread_mutex_t queue_lock = PTHREAD_MUTEX_INITIALIZER;
 pthread_cond_t full = PTHREAD_COND_INITIALIZER;
 pthread_cond_t empty = PTHREAD_COND_INITIALIZER;
 int buf_write_idx = 0;
 int buf_read_idx = 0;
 int buff_request_count = 0;
-int max_request_count = 0;
 
 /* static functions */
+struct cache *cache_init();
+struct node *entry_init();
+
 void request_main_loop();
-void update_request_count();
-void increment();
-void server_destory(struct server *sv);
+
+void server_destroy(struct server *sv);
 void cache_destroy_all(struct server *sv);
 void thread_destroy_all(struct server *sv);
-struct cache *cache_init(int max_cache_size);
-void cache_add(struct file_data *data, struct node *entry);
-struct file_data *copy_file_data(struct file_data *data);
-void cache_free(struct node *entry);
-bool cache_lookup(struct server *sv, struct file_data *data);
+
+bool try_fill_data(struct server *sv, struct file_data *data);
+struct node *cache_lookup(struct node *entry, char *name);
 void cache_insert(struct server *sv, struct file_data *data);
-void cache_evict(struct server *sv, int amount_to_evict);
-unsigned long get_key(char *file_name);
+void copy_data_to_entry(struct file_data *data, struct node *entry);
+struct file_data *copy_file_data(struct file_data *data);
+void cache_evict(struct server *sv, int next_size);
+void clear_entry(struct node *entry);
+void clear_node(struct node *entry);
 
-
-bool cache_lookup(struct server *sv, struct file_data *data) {
-    char *name = data->file_name;
-    unsigned long key = get_key(name);
-    int hash_idx = key % sv->max_cache_size;
-    int counter = 0;
-    while(counter < sv->max_cache_size) {
-        if(!(sv->cache->entry[hash_idx]->in_use) ||
-                strcmp(sv->cache->entry[hash_idx]->data->file_name, name) != 0) {
-            // not at this index, move on
-            hash_idx = (hash_idx + 1) % sv->max_cache_size;
-            ++counter;
-            continue;
-        }
-        // found
-        struct file_data *found_data = sv->cache->entry[hash_idx]->data;
-        data->file_buf = Malloc(found_data->file_size);
-        memcpy(data->file_buf, found_data->file_buf, found_data->file_size);
-        data->file_size = found_data->file_size;
-        ++(sv->cache->entry[hash_idx]->request_count);
-
-        if(max_request_count < sv->cache->entry[hash_idx]->request_count) {
-            max_request_count = sv->cache->entry[hash_idx]->request_count;
-        }
-        return true;
-    }
-    return false;
-}
-
-void cache_insert(struct server *sv, struct file_data *data) {
-    if(sv->cache->current_size == sv->max_cache_size) {
-        cache_evict(sv, sv->max_cache_size / 5);
-    }
-    char *name = data->file_name;
-    unsigned long key = get_key(name);
-    int hash_idx = key % sv->max_cache_size;
-    while(sv->cache->entry[hash_idx]->in_use) {
-        hash_idx = (hash_idx + 1) % sv->max_cache_size;
-    }
-    cache_add(data, sv->cache->entry[hash_idx]);
-    ++(sv->cache->current_size);
-    return;
-}
-
-void cache_add(struct file_data *data, struct node *entry) {
-    entry->in_use = true;
-    entry->data = (struct file_data *)Malloc(sizeof(struct file_data));
-    memset(entry->data, 0, sizeof(struct file_data));
-    entry->data = copy_file_data(data);
-    entry->request_count = 0;
-}
-
-struct file_data *copy_file_data(struct file_data *data) {
-    struct file_data *new_data = Malloc(sizeof(struct file_data));
-    memset(new_data, 0, sizeof(struct file_data));
-
-    new_data->file_name = Malloc(strlen(data->file_name));
-    memcpy(new_data->file_name, data->file_name, strlen(data->file_name));
-
-    new_data->file_size = data->file_size;
-
-    new_data->file_buf = Malloc(data->file_size);
-    memset(new_data->file_buf, 0, data->file_size);
-    memcpy(new_data->file_buf, data->file_buf, data->file_size);
-    return new_data;
-}
-
-void cache_free(struct node *entry) {
-    entry->in_use = false;
-    free(entry->data->file_name);
-    entry->data->file_name = NULL;
-
-    free(entry->data->file_buf);
-    entry->data->file_buf = NULL;
-
-    free(entry->data);
-    entry->data = NULL;
-}
-
-void cache_evict(struct server *sv, int amount_to_evict) {
-    int evict_count = 0;
-    for(int i = 0; i < sv->max_cache_size; ++i) {
-        if(evict_count < amount_to_evict && sv->cache->entry[i]->in_use) {
-            if(sv->cache->entry[i]->request_count == 0 ||
-                    sv->cache->entry[i]->request_count < max_request_count / 4) {
-                // this one needs to be evicted
-                cache_free(sv->cache->entry[i]);
-                ++evict_count;
-                --(sv->cache->current_size);
-            }
-        sv->cache->entry[i]->request_count = 0;
-        }
-    }
-    //printf("evict %d caches, now size is %d...\n\n", evict_count, sv->cache->current_size);
-}
-
-struct cache *cache_init(int max_cache_size) {
-    struct cache *cache = (struct cache*) Malloc(sizeof(struct cache));
-    memset(cache, 0, sizeof(struct cache));
-
-    cache->entry = (struct node **)Malloc(sizeof(struct node *) * max_cache_size);
-    memset(cache->entry, 0, sizeof(struct node *) * max_cache_size);
-    for(int i = 0; i < max_cache_size; ++i) {
-        cache->entry[i] = (struct node *)Malloc(sizeof(struct node));
-        memset(cache->entry[i], 0, sizeof(struct node));
-    cache->entry[i]->in_use = false;
-    cache->entry[i]->in_op = false;
-    cache->entry[i]->data = (struct file_data *)Malloc(sizeof(struct file_data));
-    }
-    cache->current_size = 0;
-    max_request_count = 0;
-    return cache;
-}
-
-unsigned long get_key(char *file_name) {
-    unsigned long hash = 5381;
-    int c;
-
-    while((int)(c = *file_name++))
-        hash = ((hash << 5) + hash) + c; // hash*33 + c
-    return hash;
-}
+unsigned long get_hash_key(char *file_name);
+void update_request_count();
+void increment();
+static int atomic_add(int *val, int num);
+static int atomic_sub(int *val, int num);
 
 /* initialize file data */
-static struct file_data *
-file_data_init(void)
+static struct file_data *file_data_init(void)
 {
     struct file_data *data;
 
@@ -187,16 +76,14 @@ file_data_init(void)
 }
 
 /* free all file data */
-static void
-file_data_free(struct file_data *data)
+static void file_data_free(struct file_data *data)
 {
     free(data->file_name);
     free(data->file_buf);
     free(data);
 }
 
-static void
-do_server_request(struct server *sv, int connfd)
+static void do_server_request(struct server *sv, int connfd)
 {
     int ret;
     struct request *rq;
@@ -210,24 +97,17 @@ do_server_request(struct server *sv, int connfd)
         file_data_free(data);
         return;
     }
-    if(sv->cache != NULL && cache_lookup(sv, data)) {
-        // if found data in matcing the file name in cache then data is updated in rq->data
-        //printf("found!\n");
-        goto send;
-    } else {
-        // cache not found, need to request to read
-        /* read file,
-         * fills data->file_buf with the file contents,
-         * data->file_size with file size. */
-    //printf("not found!\n");
-        ret = request_readfile(rq);
-        if (ret == 0) { /* couldn't read file */
-            goto out;
-        }
-        if(sv->cache != NULL) cache_insert(sv, data);
+    if(sv->max_cache_size == 0) goto read;
+    if(try_fill_data(sv, data)) goto send;
+
+read:
+    ret = request_readfile(rq);
+    if (ret == 0) { /* couldn't read file */
+        goto out;
     }
-    /* send file to client */
+    if(sv->max_cache_size != 0) cache_insert(sv, data);
 send:
+    /* send file to client */
     request_sendfile(rq);
 out:
     request_destroy(rq);
@@ -236,8 +116,7 @@ out:
 
 /* entry point functions */
 
-struct server *
-server_init(int nr_threads, int max_requests, int max_cache_size)
+struct server *server_init(int nr_threads, int max_requests, int max_cache_size)
 {
     struct server *sv;
 
@@ -251,7 +130,7 @@ server_init(int nr_threads, int max_requests, int max_cache_size)
     sv->buf = (int *)malloc(buf_size * sizeof(int));
     if (nr_threads > 0 || max_requests > 0 || max_cache_size > 0) {
         sv->worker_threads = (pthread_t **)malloc(nr_threads * sizeof(pthread_t *));
-    if(max_cache_size > 0) sv->cache = cache_init(max_cache_size);
+    if(max_cache_size > 0) sv->cache = cache_init(TABLE_SIZE);
         for(int i = 0; i < nr_threads; ++i) {
             sv->worker_threads[i] = (pthread_t *)malloc(sizeof(pthread_t));
             pthread_create(sv->worker_threads[i], NULL, (void *)&request_main_loop, sv);
@@ -269,21 +148,25 @@ server_init(int nr_threads, int max_requests, int max_cache_size)
     return sv;
 }
 
-void update_request_count(int buf_size) {
-    buff_request_count = (buf_write_idx - buf_read_idx + buf_size) % buf_size;
-}
+struct cache *cache_init() {
+    struct cache *cache = (struct cache*) Malloc(sizeof(struct cache));
+    memset(cache, 0, sizeof(struct cache));
 
-void increment(int *idx, int buf_size) {
-    ++(*idx);
-    *idx = (*idx) % buf_size;
-    update_request_count(buf_size);
-}
-
-void thread_destroy_all(struct server *sv) {
-    for(int i = 0; i < sv->nr_threads; ++i) {
-        pthread_join(*sv->worker_threads[i], NULL);
+    cache->entry = (struct node **)Malloc(sizeof(struct node *) * TABLE_SIZE);
+    memset(cache->entry, 0, sizeof(struct node *) * TABLE_SIZE);
+    for(int i = 0; i < TABLE_SIZE; ++i) {
+        cache->entry[i] = entry_init();
+        ref_count[i] = 0;
     }
-    free(sv->worker_threads);
+    return cache;
+}
+
+struct node *entry_init() {
+    struct node *new_node = (struct node *)Malloc(sizeof(struct node));
+    memset(new_node, 0, sizeof(struct node));
+    new_node->data = NULL;
+    new_node->next = NULL;
+    return new_node;
 }
 
 void request_main_loop(struct server *sv) {
@@ -306,8 +189,7 @@ void request_main_loop(struct server *sv) {
     }
 }
 
-void
-server_request(struct server *sv, int connfd)
+void server_request(struct server *sv, int connfd)
 {
     if (sv->nr_threads == 0) { /* no worker threads */
         do_server_request(sv, connfd);
@@ -331,27 +213,7 @@ server_request(struct server *sv, int connfd)
     }
 }
 
-void cache_destroy_all(struct server *sv) {
-    for(int i = 0; i < sv->max_cache_size; ++i) {
-        if(sv->cache->entry[i]->in_use) {
-            cache_free(sv->cache->entry[i]);
-        }
-        free(sv->cache->entry[i]);
-    }
-    free(sv->cache->entry);
-    sv->cache->entry = NULL;
-    free(sv->cache);
-    sv->cache = NULL;
-}
-
-void server_destroy(struct server *sv) {
-    thread_destroy_all(sv);
-    cache_destroy_all(sv);
-
-}
-
-void
-server_exit(struct server *sv)
+void server_exit(struct server *sv)
 {
     /* when using one or more worker threads, use sv->exiting to indicate to
      * these threads that the server is exiting. make sure to call
@@ -366,4 +228,192 @@ server_exit(struct server *sv)
 
     /* make sure to free any allocated resources */
     free(sv);
+}
+
+void server_destroy(struct server *sv) {
+    thread_destroy_all(sv);
+    if(sv->max_cache_size > 0) cache_destroy_all(sv);
+}
+
+void thread_destroy_all(struct server *sv) {
+    for(int i = 0; i < sv->nr_threads; ++i) {
+        pthread_join(*sv->worker_threads[i], NULL);
+    }
+    free(sv->worker_threads);
+}
+
+void cache_destroy_all(struct server *sv) {
+    for(int i = 0; i < TABLE_SIZE; ++i) {
+        struct node *tmp_entry = sv->cache->entry[i];
+        if(tmp_entry->data != NULL) clear_entry(tmp_entry);
+        free(tmp_entry);
+    }
+    free(sv->cache);
+    sv->cache = NULL;
+}
+
+bool try_fill_data(struct server *sv, struct file_data *data) {
+    char *name = data->file_name;
+    unsigned long key = get_hash_key(name);
+    int hash_idx = key % TABLE_SIZE;
+    while(atomic_add(&ref_count[hash_idx], 1) != 0) {
+        // someone else is working on this entry,
+        //yield this thread and come back later
+        atomic_sub(&ref_count[hash_idx], 1);
+        pthread_yield();
+    }
+
+    // ref count = 1
+    struct node *found_node = cache_lookup(sv->cache->entry[hash_idx], name);
+    if(found_node == NULL) {
+        //not found
+        atomic_sub(&ref_count[hash_idx], 1);
+        // ref count = 0
+        return false;
+    }
+
+    //found
+    struct file_data *found_data = found_node->data;
+    data->file_buf = Malloc(found_data->file_size);
+    memcpy(data->file_buf, found_data->file_buf, found_data->file_size);
+    data->file_size = found_data->file_size;
+    atomic_add(&request_count[hash_idx], 1);
+    atomic_sub(&ref_count[hash_idx], 1);
+    //ref count = 0
+    return true;
+}
+
+struct node *cache_lookup(struct node *entry, char *name) {
+    if(entry->data == NULL) return NULL;
+    struct node *tmp = entry;
+    while(tmp != NULL) {
+        if(strcmp(tmp->data->file_name, name) == 0) {
+            // found
+            return tmp;
+        }
+        tmp = tmp->next;
+    }
+    return tmp;
+}
+
+void cache_insert(struct server *sv, struct file_data *data) {
+    while(atomic_add(&in_evict, 1) != 0) {
+        atomic_sub(&in_evict, 1);
+        pthread_yield();
+    }
+    if(current_cache_size + data->file_size > sv->max_cache_size) {
+        cache_evict(sv, data->file_size);
+    }
+    atomic_sub(&in_evict, 1);
+
+    char *name = data->file_name;
+    unsigned long key = get_hash_key(name);
+    int hash_idx = key % TABLE_SIZE;
+    while(atomic_add(&ref_count[hash_idx], 1) != 0) {
+        atomic_sub(&ref_count[hash_idx], 1);
+        pthread_yield();
+    }
+
+    // ref count = 1
+    copy_data_to_entry(data, sv->cache->entry[hash_idx]);
+    atomic_sub(&ref_count[hash_idx], 1);
+}
+
+void copy_data_to_entry(struct file_data *data, struct node *entry) {
+    struct node *tmp_entry = entry;
+    if(tmp_entry->data == NULL) goto fill_entry;
+    while(tmp_entry != NULL) tmp_entry = tmp_entry->next;
+    tmp_entry = entry_init();
+
+fill_entry:
+    tmp_entry->data = copy_file_data(data);
+}
+
+struct file_data *copy_file_data(struct file_data *data) {
+    struct file_data *new_data = Malloc(sizeof(struct file_data));
+    memset(new_data, 0, sizeof(struct file_data));
+
+    new_data->file_name = Malloc(strlen(data->file_name) + 1);
+    memset(new_data->file_name, 0, strlen(data->file_name) + 1);
+    memcpy(new_data->file_name, data->file_name, strlen(data->file_name));
+
+    new_data->file_size = data->file_size;
+
+    new_data->file_buf = Malloc(data->file_size);
+    memset(new_data->file_buf, 0, data->file_size);
+    memcpy(new_data->file_buf, data->file_buf, data->file_size);
+    current_cache_size += data->file_size;
+    return new_data;
+}
+
+void cache_evict(struct server *sv, int next_size) {
+    for(int i = 0; i < TABLE_SIZE; ++i) {
+        if(atomic_add(&ref_count[i], 1) != 0) {
+            atomic_sub(&ref_count[i], 1);
+            continue;
+        }
+        struct node *tmp_entry = sv->cache->entry[i];
+        if(tmp_entry->data != NULL && ref_count[i] <= 1) {
+            clear_entry(tmp_entry);
+            if(current_cache_size + next_size < sv->max_cache_size) {
+                atomic_sub(&ref_count[i], 1);
+                break;
+            }
+        }
+        atomic_sub(&ref_count[i], 1);
+    }
+    memset(request_count, 0, TABLE_SIZE * sizeof(int));
+}
+
+void clear_entry(struct node *entry) {
+    clear_node(entry);
+    struct node *cur_entry = entry->next;
+    struct node *next_entry = NULL;
+    entry->next = NULL;
+    while(cur_entry != NULL) {
+        next_entry = cur_entry->next;
+        clear_node(cur_entry);
+        free(cur_entry);
+        cur_entry = next_entry;
+    }
+}
+
+void clear_node(struct node *entry) {
+    int free_size = entry->data->file_size;
+    free(entry->data->file_name);
+    entry->data->file_name = NULL;
+
+    free(entry->data->file_buf);
+    entry->data->file_buf = NULL;
+
+    free(entry->data);
+    entry->data = NULL;
+    current_cache_size -= free_size;
+}
+
+unsigned long get_hash_key(char *file_name) {
+    unsigned long hash = 5381;
+    int c;
+
+    while((int)(c = *file_name++))
+        hash = ((hash << 5) + hash) + c; // hash * 33 + c
+    return hash;
+}
+
+void update_request_count(int buf_size) {
+    buff_request_count = (buf_write_idx - buf_read_idx + buf_size) % buf_size;
+}
+
+void increment(int *idx, int buf_size) {
+    ++(*idx);
+    *idx = (*idx) % buf_size;
+    update_request_count(buf_size);
+}
+
+static int atomic_add(int *val, int num) {
+    return __atomic_fetch_add(val, num, __ATOMIC_SEQ_CST);
+}
+
+static int atomic_sub(int *val, int num) {
+    return __atomic_fetch_sub(val, num, __ATOMIC_SEQ_CST);
 }
