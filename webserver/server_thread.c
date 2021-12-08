@@ -28,7 +28,7 @@ struct node {
 #define TABLE_SIZE 4999
 
 int in_evict = 0;
-atomic_int current_cache_size = 0;
+int current_cache_size = 0;
 int ref_count[TABLE_SIZE];
 int request_count[TABLE_SIZE];
 pthread_mutex_t queue_lock = PTHREAD_MUTEX_INITIALIZER;
@@ -302,7 +302,7 @@ void cache_insert(struct server *sv, struct file_data *data) {
         atomic_sub(&in_evict, 1);
         pthread_yield();
     }
-    if(current_cache_size + data->file_size > sv->max_cache_size) {
+    if(atomic_add(&current_cache_size, 0) > sv->max_cache_size + data->file_size) {
         cache_evict(sv, data->file_size);
     }
     atomic_sub(&in_evict, 1);
@@ -354,16 +354,15 @@ void cache_evict(struct server *sv, int next_size) {
             continue;
         }
         struct node *tmp_entry = sv->cache->entry[i];
-        if(tmp_entry->data != NULL && ref_count[i] <= 1) {
+        if(tmp_entry->data != NULL && request_count[i] == 0) {
             clear_entry(tmp_entry);
-            if(current_cache_size + next_size < sv->max_cache_size) {
+            if(atomic_add(&current_cache_size, 0) < sv->max_cache_size - next_size) {
                 atomic_sub(&ref_count[i], 1);
                 break;
             }
         }
         atomic_sub(&ref_count[i], 1);
     }
-    memset(request_count, 0, TABLE_SIZE * sizeof(int));
 }
 
 void clear_entry(struct node *entry) {
@@ -389,7 +388,7 @@ void clear_node(struct node *entry) {
 
     free(entry->data);
     entry->data = NULL;
-    current_cache_size -= free_size;
+    atomic_sub(&current_cache_size, free_size);
 }
 
 unsigned long get_hash_key(char *file_name) {
