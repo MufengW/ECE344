@@ -128,16 +128,17 @@ struct server *server_init(int nr_threads, int max_requests, int max_cache_size)
     sv->exiting = 0;
 
     sv->buf = (int *)malloc(buf_size * sizeof(int));
-    if (nr_threads > 0 || max_requests > 0 || max_cache_size > 0) {
+
+    if(max_cache_size > 0) sv->cache = cache_init();
+    if (nr_threads > 0 || max_requests > 0) {
         sv->worker_threads = (pthread_t **)malloc(nr_threads * sizeof(pthread_t *));
-    if(max_cache_size > 0) sv->cache = cache_init(TABLE_SIZE);
         for(int i = 0; i < nr_threads; ++i) {
             sv->worker_threads[i] = (pthread_t *)malloc(sizeof(pthread_t));
             pthread_create(sv->worker_threads[i], NULL, (void *)&request_main_loop, sv);
         }
-    }
     buf_write_idx = 0;
     buf_read_idx = 0;
+    }
 
     /* Lab 4: create queue of max_request size when max_requests > 0 */
 
